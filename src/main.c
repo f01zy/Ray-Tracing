@@ -9,6 +9,17 @@
 #define WIDTH        (400)
 #define ASPECT_RATIO (16.0f / 9.0f)
 
+typedef enum {
+  OBJECT_SPHERE,
+} ObjectType;
+
+typedef struct {
+  vec3 position;
+  vec3 normal;
+  float t;
+  bool is_front;
+} Hit;
+
 typedef struct {
   vec3 origin;
   vec3 direction;
@@ -19,31 +30,83 @@ typedef struct {
   float radius;
 } Sphere;
 
-Sphere spheres[] = {
-  {.position = {-2.0f, 0.0f, -4.0f}, .radius = 1.0f},
-  {.position = {1.0f, 0.0f, -2.0f}, .radius = 1.0f},
+typedef struct {
+  ObjectType type;
+  union {
+    Sphere sphere;
+  } as;
+} Object;
+
+Object objects[] = {
+  {
+    .type = OBJECT_SPHERE,
+    .as.sphere = {
+      .position = {0.0f, 0.0f, -1.0f},
+      .radius = 0.5f,
+    },
+  },
 };
 
-float hit_sphere(Ray *ray, Sphere *sphere) {
+void ray_at(Ray *ray, float t, vec3 dest) {
+  vec3 temp;
+  glm_vec3_scale(ray->direction, t, temp);
+  glm_vec3_add(ray->origin, temp, dest);
+}
+
+void hit_set_normal(Ray *ray, Hit *hit, vec3 normal) {
+  hit->is_front = glm_vec3_dot(ray->direction, normal) < 0.0f;
+  if (!hit->is_front) glm_vec3_scale(normal, -1.0f, normal);
+  glm_vec3_copy(normal, hit->normal);
+}
+
+bool hit_sphere(Ray *ray, Sphere *sphere, float t_min, float t_max, Hit *hit) {
   vec3 oc;
-  glm_vec3_sub(sphere->position, ray->direction, oc);
+  glm_vec3_sub(sphere->position, ray->origin, oc);
   float a = glm_vec3_dot(ray->direction, ray->direction);
   float h = glm_vec3_dot(ray->direction, oc);
   float c = glm_vec3_dot(oc, oc) - sphere->radius * sphere->radius;
   float d = h * h - a * c;
-  if (d >= 0.0f) return h - sqrt(d) / a;
-  return -1.0f;
+  if (d < 0.0f) return false;
+  float sqrtd = sqrt(d);
+  float t1 = (h - d) / a, t2 = (h + d) / a, t = -1.0f;
+  if (t2 > t_min && t2 < t_max) t = t2;
+  if (t1 > t_min && t1 < t_max) t = t1;
+  if (t == -1.0f) return false;
+  ray_at(ray, t, hit->position);
+  vec3 normal;
+  glm_vec3_sub(hit->position, sphere->position, normal);
+  glm_vec3_normalize(normal);
+  hit_set_normal(ray, hit, normal);
+  hit->t = t;
+  return true;
+}
+
+bool hit_world(Ray *ray, float t_min, float t_max, Hit *rec) {
+  size_t objects_count = sizeof(objects) / sizeof(*objects);
+  float far = t_max;
+  bool is_hit_anything = false;
+  for (int i = 0; i < objects_count; i++) {
+    bool is_hit = false;
+    switch (objects[i].type) {
+    case OBJECT_SPHERE:
+      is_hit = hit_sphere(ray, &objects[i].as.sphere, t_min, far, rec);
+      break;
+    }
+    if (is_hit) {
+      is_hit_anything = true;
+      far = rec->t;
+    }
+  }
+  return is_hit_anything;
 }
 
 void ray_color(Ray *ray, vec3 dest) {
-  size_t spheres_count = sizeof(spheres) / sizeof(*spheres);
-  for (int i = 0; i < spheres_count; i++) {
-    float t = hit_sphere(ray, &spheres[i]);
-    if (t >= 0.0f) {
-      vec3 red = {1.0f, 0.0f, 0.0f};
-      glm_vec3_copy(red, dest);
-      return;
-    }
+  Hit rec;
+  if (hit_world(ray, 0.0f, INFINITY, &rec)) {
+    vec3 color;
+    glm_vec3_adds(rec.normal, 1.0f, color);
+    glm_vec3_scale(color, 0.5f, dest);
+    return;
   }
   vec3 blue = {0.1f, 0.6f, 0.9f};
   vec3 white = {1.0f, 1.0f, 1.0f};
@@ -53,12 +116,6 @@ void ray_color(Ray *ray, vec3 dest) {
   glm_vec3_scale(blue, a, blue);
   glm_vec3_scale(white, 1.0f - a, white);
   glm_vec3_add(blue, white, dest);
-}
-
-void ray_at(Ray *ray, float t, vec3 dest) {
-  vec3 temp;
-  glm_vec3_scale(ray->direction, t, temp);
-  glm_vec3_add(ray->origin, temp, dest);
 }
 
 void write_color(FILE *stream, vec3 color) {
@@ -73,13 +130,12 @@ void write_color(FILE *stream, vec3 color) {
 int main(int argc, char **argv) {
   int width = WIDTH;
   int height = width / ASPECT_RATIO;
-  height = height < 1 ? 1 : height;
 
-  float focal_length = 1.0f;
+  vec3 temp;
   float viewport_height = 2.0f;
   float viewport_width = viewport_height * ((float)width / height);
+  float focal_length = 1.0f;
   vec3 camera_position = {0.0f, 0.0f, 0.0f};
-  vec3 temp;
 
   vec3 viewport_u = {viewport_width, 0.0f, 0.0f};
   vec3 viewport_v = {0.0f, -viewport_height, 0.0f};
