@@ -1,4 +1,5 @@
 #include <cglm/cglm.h>
+#include <float.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -8,55 +9,19 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "types.h"
+
 #define WIDTH             (400)
 #define ASPECT_RATIO      (16.0f / 9.0f)
 #define FOCAL_LENGTH      (1.0f)
 #define SAMPLES_PER_PIXEL (100)
-
-typedef enum {
-  OBJECT_SPHERE,
-} ObjectType;
-
-typedef struct {
-  vec3 position;
-  vec3 normal;
-  float t;
-  bool is_front;
-} Hit;
-
-typedef struct {
-  vec3 origin;
-  vec3 direction;
-} Ray;
-
-typedef struct {
-  vec3 position;
-  float radius;
-} Sphere;
-
-typedef struct {
-  ObjectType type;
-  union {
-    Sphere sphere;
-  } as;
-} Object;
-
-typedef struct {
-  vec3 position;
-  vec3 pixel_delta_u, pixel_delta_v;
-  vec3 origin_pixel_center;
-  float aspect_ratio;
-  float focal_length;
-  int samples_per_pixel;
-  int width;
-  int height;
-} Camera;
+#define MAX_RAY_DEPTH     (50)
 
 Object objects[] = {
   {
     .type = OBJECT_SPHERE,
     .as.sphere = {
-      .position = {0.0f, 0.0f, -3.0f},
+      .position = {0.0f, 0.0f, -2.0f},
       .radius = 1.0f,
     },
   },
@@ -69,14 +34,33 @@ Object objects[] = {
   },
 };
 
+float linear_to_gamma(float component) {
+  if (component < 0.0f) return 0.0f;
+  return sqrt(component);
+}
+
 float random_number() { return rand() / (RAND_MAX + 1.0f); }
 
-float random_range(float min, float max) { return min + (max - min) * random_number(); }
+void random_vector(vec3 dest) {
+  vec3 temp = {random_number(), random_number(), random_number()};
+  glm_vec3_copy(temp, dest);
+}
+
+void random_unit_vector(vec3 dest) {
+  while (1) {
+    random_vector(dest);
+    float quad_length = glm_vec3_dot(dest, dest);
+    if (FLT_MIN < quad_length && quad_length <= 1.0f) {
+      glm_normalize(dest);
+      return;
+    }
+  }
+}
 
 void write_color(FILE *stream, vec3 color) {
-  uint8_t rbyte = 255 * glm_clamp(color[0], 0.0f, 0.999f);
-  uint8_t gbyte = 255 * glm_clamp(color[1], 0.0f, 0.999f);
-  uint8_t bbyte = 255 * glm_clamp(color[2], 0.0f, 0.999f);
+  uint8_t rbyte = glm_clamp(linear_to_gamma(color[0]), 0.0f, 0.999f) * 255;
+  uint8_t gbyte = glm_clamp(linear_to_gamma(color[1]), 0.0f, 0.999f) * 255;
+  uint8_t bbyte = glm_clamp(linear_to_gamma(color[2]), 0.0f, 0.999f) * 255;
   char buf[64];
   size_t len = snprintf(buf, sizeof(buf), "%d %d %d\n", rbyte, gbyte, bbyte);
   fwrite(buf, 1, len, stream);
@@ -92,7 +76,7 @@ void ray_at(Ray *ray, float t, vec3 dest) {
 
 void hit_set_normal(Ray *ray, Hit *hit, vec3 normal) {
   hit->is_front = glm_vec3_dot(ray->direction, normal) < 0.0f;
-  if (!hit->is_front) glm_vec3_scale(normal, -1.0f, normal);
+  if (!hit->is_front) glm_vec3_inv(normal);
   glm_vec3_copy(normal, hit->normal);
 }
 
@@ -136,16 +120,24 @@ bool hit_world(Ray *ray, vec2 interval, Hit *rec) {
   return is_hit_anything;
 }
 
-void camera_ray_color(Ray *ray, vec3 dest) {
-  Hit rec;
-  vec2 interval = {0.0f, INFINITY};
-  if (hit_world(ray, interval, &rec)) {
-    vec3 color;
-    glm_vec3_adds(rec.normal, 1.0f, color);
-    glm_vec3_scale(color, 0.5f, dest);
+void camera_ray_color(Ray *ray, int depth, vec3 dest) {
+  if (depth <= 0) {
+    vec3 black = {0.0f, 0.0f, 0.0f};
+    glm_vec3_copy(black, dest);
     return;
   }
-  vec3 blue = {0.1f, 0.6f, 0.9f};
+  Hit rec;
+  vec2 interval = {0.001f, INFINITY};
+  if (hit_world(ray, interval, &rec)) {
+    Ray from;
+    random_unit_vector(from.direction);
+    glm_vec3_add(rec.normal, from.direction, from.direction);
+    glm_vec3_copy(rec.position, from.origin);
+    camera_ray_color(&from, depth - 1, dest);
+    glm_vec3_scale(dest, 0.5f, dest);
+    return;
+  }
+  vec3 blue = {0.5f, 0.7f, 1.0f};
   vec3 white = {1.0f, 1.0f, 1.0f};
   vec3 norm;
   glm_vec3_normalize_to(ray->direction, norm);
@@ -170,11 +162,7 @@ void camera_get_ray(Camera *camera, int i, int j, Ray *dest) {
   glm_vec3_normalize_to(ray_direction, dest->direction);
 }
 
-void camera_initialize(Camera *camera, int width, float aspect_ratio, float focal_length, float samples_per_pixel) {
-  camera->aspect_ratio = aspect_ratio;
-  camera->focal_length = focal_length;
-  camera->samples_per_pixel = samples_per_pixel;
-  camera->width = width;
+void camera_initialize(Camera *camera) {
   camera->height = camera->width / camera->aspect_ratio;
   float viewport_height = 2.0f;
   float viewport_width = viewport_height * ((float)camera->width / camera->height);
@@ -185,8 +173,8 @@ void camera_initialize(Camera *camera, int width, float aspect_ratio, float foca
 
   vec3 viewport_u = {viewport_width, 0.0f, 0.0f};
   vec3 viewport_v = {0.0f, -viewport_height, 0.0f};
-  glm_vec3_scale(viewport_u, 1.0f / camera->width, camera->pixel_delta_u);
-  glm_vec3_scale(viewport_v, 1.0f / camera->height, camera->pixel_delta_v);
+  glm_vec3_divs(viewport_u, camera->width, camera->pixel_delta_u);
+  glm_vec3_divs(viewport_v, camera->height, camera->pixel_delta_v);
 
   vec3 focal_vec = {0.0f, 0.0f, camera->focal_length};
   vec3 viewport_up_left;
@@ -208,10 +196,10 @@ void camera_render(Camera *camera) {
       vec3 color = GLM_VEC3_ZERO_INIT;
       for (int k = 0; k < camera->samples_per_pixel; k++) {
         camera_get_ray(camera, i, j, &ray);
-        camera_ray_color(&ray, sample);
+        camera_ray_color(&ray, camera->max_ray_depth, sample);
         glm_vec3_add(color, sample, color);
       }
-      glm_vec3_scale(color, 1.0f / camera->samples_per_pixel, color);
+      glm_vec3_divs(color, camera->samples_per_pixel, color);
       write_color(stdout, color);
     }
   }
@@ -219,7 +207,13 @@ void camera_render(Camera *camera) {
 
 int main(int argc, char **argv) {
   srand(time(NULL));
-  Camera camera;
-  camera_initialize(&camera, WIDTH, ASPECT_RATIO, FOCAL_LENGTH, SAMPLES_PER_PIXEL);
+  Camera camera = {
+    .width = WIDTH,
+    .aspect_ratio = ASPECT_RATIO,
+    .focal_length = FOCAL_LENGTH,
+    .samples_per_pixel = SAMPLES_PER_PIXEL,
+    .max_ray_depth = MAX_RAY_DEPTH,
+  };
+  camera_initialize(&camera);
   camera_render(&camera);
 }
